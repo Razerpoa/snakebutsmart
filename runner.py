@@ -1,15 +1,18 @@
 import random
 import pygame
-from snake_ai import SmartSnakeAI, Position # Import Position class
+from snake_ai import SmartSnakeAI
 
 # --- Constants ---
-GRID_WIDTH = 30
-GRID_HEIGHT = 30
-CELL_SIZE = 20
+GRID_WIDTH = 50
+GRID_HEIGHT = 50
+CELL_SIZE = 10
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 GREEN = (0, 255, 0)
 RED = (255, 0, 0)
+EMPTY = 0
+SNAKE = 1
+FOOD = 2
 GRID_LINE_COLOR = (50, 50, 50)
 
 # --- Helper Functions (Updated for Position) ---
@@ -31,11 +34,11 @@ def spawn_food(grid: list[list[int]]):
     """
     empty_cells = [
         (x, y) for y in range(GRID_HEIGHT) 
-        for x in range(GRID_WIDTH) if grid[y][x] == 0
+        for x in range(GRID_WIDTH) if grid[y][x] == EMPTY
     ]
     if empty_cells:
         x, y = random.choice(empty_cells)
-        grid[y][x] = 2
+        grid[y][x] = FOOD
 
 # --- Pygame Initialization ---
 pygame.init()
@@ -103,7 +106,7 @@ if __name__ == '__main__':
                         game_over = True
                     else:
                         # Handle movement and food
-                        found_food = grid[new_y][new_x] == 2
+                        found_food = grid[new_y][new_x] == FOOD
                         
                         if found_food:
                             score += 1
@@ -115,11 +118,11 @@ if __name__ == '__main__':
                                 game_over = True
                                 print(f"Game over due to timeout! Score: {score}")
                             tail = snake_body.pop()
-                            grid[tail[1]][tail[0]] = 0
+                            grid[tail[1]][tail[0]] = EMPTY
 
                         # Update snake and grid
-                        snake_body.insert(0, new_head)
-                        grid[new_y][new_x] = 1
+                        snake_body.insert(EMPTY, new_head)
+                        grid[new_y][new_x] = SNAKE
 
                         if found_food:
                             spawn_food(grid)
@@ -134,9 +137,9 @@ if __name__ == '__main__':
                 cell_content = grid[y][x]
 
                 color = BLACK
-                if cell_content == 1:  # Snake body
+                if cell_content == SNAKE:  # Snake body
                     color = GREEN
-                elif cell_content == 2:  # Food
+                elif cell_content == FOOD:  # Food
                     color = RED
 
                 pygame.draw.rect(screen, color, rect)
