@@ -35,6 +35,7 @@ class SmartSnakeAI:
         
         # Initialize Hamiltonian cycle
         self._init_hamiltonian_cycle()
+        self.recent_history_length = 5
 
     def _init_hamiltonian_cycle(self):
         """Initialize the Hamiltonian cycle for the grid"""
@@ -100,7 +101,7 @@ class SmartSnakeAI:
         
         # Check if move follows Hamiltonian cycle
         if self._follows_hamiltonian(pos, snake_body[0]):
-            score += 200 * (depth * 0.5)
+            score += 50 * (depth * 0.5)
         
         # Recursive evaluation of next possible moves
         max_future_score = -float('inf')
@@ -193,12 +194,35 @@ class SmartSnakeAI:
         raise ValueError("Positions are not adjacent")
 
     def _is_path_a_trap(self, path: List[Position], snake_body: Tuple[Position, ...]) -> bool:
-        simulated_snake = path + list(snake_body)
-        simulated_snake = simulated_snake[:len(snake_body) + 1]
-        new_head = simulated_snake[0]
-        new_tail = simulated_snake[-1]
-        path_to_tail = self._find_path(new_head, new_tail, tuple(simulated_snake))
-        return path_to_tail is None
+        if not path: # Should not happen if path_to_food is valid
+            return False # Or True, depending on desired behavior for empty path
+
+        # Simulate the snake's body after moving along the entire path and eating food.
+        # The new head will be the end of the path (food position).
+        # The snake's length increases by 1.
+
+        # Construct the full new body: path segments in order of new body, then previous body segments.
+        # Example: path = [p1, p2, food_pos], snake_body = [s_head, s2, s_tail]
+        # new_body_ordered_segments = [food_pos, p2, p1, s_head, s2] (s_tail is dropped)
+
+        temp_new_body = list(reversed(path)) + list(snake_body)
+        simulated_full_snake_body = tuple(temp_new_body[:len(snake_body) + 1])
+
+        new_head = simulated_full_snake_body[0] # This is path[-1] (food position)
+        new_tail = simulated_full_snake_body[-1] # This is the new tail of the longer snake
+
+        # If the snake is very short (e.g., head and tail are the same or adjacent after growth),
+        # it's not really a "trap" in the sense of not being able to reach its tail.
+        if len(simulated_full_snake_body) <= 2: # e.g. snake becomes head-tail or just head.
+            return False
+
+        # The obstacles for pathfinding are the *inner* segments of this new simulated body.
+        # The _find_path method takes a 'snake_body' argument and considers body[1:] as obstacles,
+        # removing 'end' (the target, i.e. new_tail) from the obstacles if it's there.
+        # This setup works correctly if we pass simulated_full_snake_body.
+        path_to_new_tail = self._find_path(new_head, new_tail, simulated_full_snake_body)
+
+        return path_to_new_tail is None
 
     def get_best_move(self, snake_body: List[Tuple[int, int]], food_pos: Tuple[int, int],
                       current_direction: Optional[str]) -> str:
@@ -237,7 +261,9 @@ class SmartSnakeAI:
         path_to_food = self._find_path(head, food, snake_pos)
         if path_to_food:
             is_trap = self._is_path_a_trap(path_to_food, snake_pos)
-            if not is_trap or self.moves_since_food > self.patience_threshold:
+            if not is_trap or \
+               (is_trap and self.moves_since_food > self.patience_threshold * 0.5) or \
+               self.moves_since_food > self.patience_threshold:
                 golden_path = path_to_food
 
         # Score moves with lookahead
@@ -253,7 +279,23 @@ class SmartSnakeAI:
             
             # Hamiltonian cycle bonus (stronger when snake is longer)
             if self._follows_hamiltonian(pos, head):
-                score += 200 * snake_ratio
+                score += 50 * snake_ratio
+
+            # Penalty for recently visited locations (to avoid short loops)
+            # snake_pos[0] is current head. snake_pos[1] is its previous location (now neck).
+            # We want to penalize if the new head 'pos' lands on a spot where the head was
+            # a few steps ago (e.g., snake_pos[2], snake_pos[3], ...).
+            # _get_valid_moves already prevents moving to snake_pos[1]'s future location.
+
+            # Determine how deep into the snake's body we check for recent positions.
+            # Max depth is self.recent_history_length, but also limited by snake's actual length.
+            # We check from index 2 (segment after neck) up to recent_history_length.
+            # E.g., if recent_history_length = 5, we check snake_pos[2], snake_pos[3], snake_pos[4].
+            history_check_limit = min(self.recent_history_length, len(snake_pos))
+            for k in range(2, history_check_limit):
+                if pos == snake_pos[k]:
+                    score -= 500  # Apply penalty
+                    break         # Apply penalty only once
             
             if score > best_score:
                 best_score = score
