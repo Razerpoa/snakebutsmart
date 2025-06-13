@@ -15,7 +15,7 @@ class Position(NamedTuple):
     x: int
     y: int
 
-class SmartSnakeAI:
+class SnakeAI:
     def __init__(self, grid_width: int, grid_height: int):
         self.grid_width = grid_width
         self.grid_height = grid_height
@@ -28,14 +28,43 @@ class SmartSnakeAI:
         # State tracking
         self.moves_since_food = 0
         self.last_snake_length = 0
+
+        # --- Tunable Parameters ---
+        # Evaluation constants
+        self.default_lookahead_depth = 3
+        self.space_eval_depth_factor_base = 1.0
+        self.space_eval_depth_factor_multiplier = 0.5
+        self.food_eval_depth_factor_base = 2.0
+        self.food_eval_depth_factor_multiplier = 0.5
+        self.hamiltonian_depth_bonus_factor = 50.0
+        self.future_state_recursion_decay = 0.5
+        self.flood_fill_freedom_neutral = 1.5
+        self.flood_fill_freedom_scale = 0.25
+
+        # Patience mechanism
+        self.base_patience_factor = 0.3
+        self.max_patience_factor = 0.7
+        self.trapped_path_patience_leniency_factor = 0.5
         
-        # Dynamic patience threshold
-        self.base_patience = self.grid_width * self.grid_height * 0.3
-        self.max_patience = self.grid_width * self.grid_height * 0.7
+        # Scoring bonuses/penalties
+        self.food_path_direct_bonus = 10000.0
+        self.hamiltonian_move_bonus_factor = 50.0
+        self.hamiltonian_contextual_length_threshold_factor = 0.4
+        self.hamiltonian_no_escape_penalty_factor = 0.25
+        self.hamiltonian_one_escape_penalty_factor = 0.75
+        self.recent_history_length = 5 # Also a form of penalty adjustment
+        self.recent_position_penalty = -500.0
+        self.danger_zone_penalty = -1000.0
+        self.danger_zone_safe_moves_threshold = 1
+        # --- End Tunable Parameters ---
+
+        # Dynamic patience threshold (calculated)
+        self.base_patience = self.grid_width * self.grid_height * self.base_patience_factor
+        self.max_patience = self.grid_width * self.grid_height * self.max_patience_factor
         
         # Initialize Hamiltonian cycle
         self._init_hamiltonian_cycle()
-        self.recent_history_length = 5
+        # self.recent_history_length = 5 # Moved to tunable parameters
 
     def _init_hamiltonian_cycle(self):
         """Initialize the Hamiltonian cycle for the grid"""
@@ -82,44 +111,66 @@ class SmartSnakeAI:
     def _manhattan_distance(self, a: Position, b: Position) -> int:
         return abs(a.x - b.x) + abs(a.y - b.y)
 
+    def _score_future_space_and_freedom(self, pos_to_eval: Position, snake_body_for_eval: Tuple[Position, ...], current_depth: int) -> float:
+        space, avg_freedom = self._flood_fill(pos_to_eval, snake_body_for_eval)
+        freedom_modifier = 1.0 + (avg_freedom - self.flood_fill_freedom_neutral) * self.flood_fill_freedom_scale
+        effective_space_score = space * freedom_modifier
+        return effective_space_score * (self.space_eval_depth_factor_base + current_depth * self.space_eval_depth_factor_multiplier)
+
+    def _score_future_food_distance(self, pos_to_eval: Position, food_position: Position, current_depth: int) -> float:
+        dist_to_food = self._manhattan_distance(pos_to_eval, food_position)
+        # Returns a negative value or zero, as it's a penalty
+        return -dist_to_food * (self.food_eval_depth_factor_base - current_depth * self.food_eval_depth_factor_multiplier)
+
+    def _score_future_hamiltonian_adherence(self, pos_to_eval: Position, prev_head_pos: Position, current_depth: int) -> float:
+        if self._follows_hamiltonian(pos_to_eval, prev_head_pos):
+            # Using space_eval_depth_factor_multiplier for the (depth * 0.5) part for consistency
+            return self.hamiltonian_depth_bonus_factor * (current_depth * self.space_eval_depth_factor_multiplier)
+        return 0.0
+
     def _evaluate_future_state(self, pos: Position, snake_body: Tuple[Position, ...], 
-                             food_pos: Position, depth: int = 3) -> float:
+                             food_pos: Position, depth: int = -1) -> float: # Default changed
         """Evaluate future states recursively up to a certain depth"""
-        if depth == 0:
+        if depth == -1: # Use instance default if not overridden
+            depth = self.default_lookahead_depth
+
+        if depth == 0: # Base case for recursion
             return 0.0
         
-        score = 0.0
-        next_snake_body = (pos,) + snake_body[:-1]
-        
-        # Check space available
-        space, avg_freedom = self._flood_fill(pos, next_snake_body)
-        # Modulate space score by average freedom
-        # avg_freedom of 1.5 is neutral. Higher is better, lower is worse.
-        # Max avg_freedom is 4. Min for a path is 1 (or 0 if completely boxed).
-        freedom_modifier = 1.0 + (avg_freedom - 1.5) * 0.25 # Factor 0.25 is tunable
-        effective_space_score = space * freedom_modifier
+        current_score = 0.0
+        # snake_body[0] is the head position *before* moving to 'pos'.
+        # next_snake_body_for_eval is the snake's body configuration *after* head moves to 'pos'.
+        next_snake_body_for_eval = (pos,) + snake_body[:-1]
 
-        score += effective_space_score * (1.0 + depth * 0.5) # Weight space more heavily in early moves
-        
-        # Evaluate food distance
-        dist_to_food = self._manhattan_distance(pos, food_pos)
-        score -= dist_to_food * (2.0 - depth * 0.5)  # Food distance matters less in later moves
-        
-        # Check if move follows Hamiltonian cycle
-        if self._follows_hamiltonian(pos, snake_body[0]):
-            score += 50 * (depth * 0.5)
-        
-        # Recursive evaluation of next possible moves
+        # Calculate score components using helper methods
+        current_score += self._score_future_space_and_freedom(pos, next_snake_body_for_eval, depth)
+        current_score += self._score_future_food_distance(pos, food_pos, depth)
+        # prev_head_pos for Hamiltonian check is snake_body[0] from the input snake_body
+        current_score += self._score_future_hamiltonian_adherence(pos, snake_body[0], depth)
+
+        # Recursive minimax-like evaluation of subsequent states
         max_future_score = -float('inf')
-        for direction in self.directions:
-            next_pos = self._move_position(pos, direction)
-            if self._is_safe(next_pos, next_snake_body):
+
+        for direction in self.directions: # self.directions are global or instance [UP, DOWN, LEFT, RIGHT]
+            potential_next_step_pos = self._move_position(pos, direction)
+
+            # Safety check for the recursive call:
+            # The 'body' for this check is next_snake_body_for_eval.
+            if self._is_safe(potential_next_step_pos, next_snake_body_for_eval):
                 future_score = self._evaluate_future_state(
-                    next_pos, next_snake_body, food_pos, depth - 1
+                    potential_next_step_pos, next_snake_body_for_eval, food_pos, depth - 1
                 )
-                max_future_score = max(max_future_score, future_score)
-        
-        return score + (max_future_score * 0.5 if max_future_score > -float('inf') else 0)
+                # Only update if future_score is actually better (handles -inf)
+                if future_score > max_future_score:
+                     max_future_score = future_score
+
+        if max_future_score > -float('inf'): # Check if any valid recursive path was found
+            current_score += max_future_score * self.future_state_recursion_decay
+        # If all future paths from here are terminal (no safe moves or depth ran out and returned 0 from bad spots),
+        # max_future_score might remain -float('inf'). In this case, we don't add it.
+        # The current_score will then reflect only the heuristic of the current state 'pos'.
+
+        return current_score
 
     def _follows_hamiltonian(self, pos: Position, prev_pos: Position) -> bool:
         """Check if move follows Hamiltonian cycle direction"""
@@ -256,8 +307,55 @@ class SmartSnakeAI:
                potential_next_pos not in snake_body_if_moved_to_pos[1:]:
                 safe_continuing_moves += 1
 
-        # If there's 1 or 0 ways to continue safely, it's a dangerous constriction.
-        return safe_continuing_moves <= 1
+        # If there's X or fewer ways to continue safely, it's a dangerous constriction.
+        return safe_continuing_moves <= self.danger_zone_safe_moves_threshold
+
+    def _calculate_golden_path_bonus(self, pos_to_evaluate: Position, golden_path_list: Optional[List[Position]]) -> float:
+        if golden_path_list and pos_to_evaluate == golden_path_list[0]:
+            return self.food_path_direct_bonus
+        return 0.0
+
+    def _calculate_hamiltonian_bonus(self, pos_to_evaluate: Position, current_head_pos: Position, current_snake_body: Tuple[Position, ...], current_snake_ratio: float) -> float:
+        score_adjustment = 0.0
+        if self._follows_hamiltonian(pos_to_evaluate, current_head_pos):
+            bonus = self.hamiltonian_move_bonus_factor * current_snake_ratio
+
+            if len(current_snake_body) > self.grid_width * self.grid_height * self.hamiltonian_contextual_length_threshold_factor:
+                try:
+                    pos_idx = self.hamiltonian_indices[pos_to_evaluate]
+                    next_on_cycle = self.hamiltonian_cycle[(pos_idx + 1) % len(self.hamiltonian_cycle)]
+                    escape_routes = 0
+                    for direction in self.directions:
+                        neighbor = self._move_position(pos_to_evaluate, direction)
+                        if neighbor == current_head_pos or neighbor == next_on_cycle:
+                            continue
+                        if self._is_on_grid(neighbor) and neighbor not in current_snake_body:
+                            escape_routes += 1
+
+                    if escape_routes == 0:
+                        bonus *= self.hamiltonian_no_escape_penalty_factor
+                    elif escape_routes == 1:
+                        bonus *= self.hamiltonian_one_escape_penalty_factor
+                except KeyError:
+                    pass # pos_to_evaluate not in cycle, _follows_hamiltonian might be more robust
+            score_adjustment = bonus
+        return score_adjustment
+
+    def _calculate_recent_position_penalty(self, pos_to_evaluate: Position, current_snake_body: Tuple[Position, ...]) -> float:
+        history_check_limit = min(self.recent_history_length, len(current_snake_body))
+        for k in range(2, history_check_limit): # Check snake_body[2] onwards
+            if pos_to_evaluate == current_snake_body[k]:
+                return self.recent_position_penalty # This is a negative value
+        return 0.0
+
+    def _calculate_danger_zone_penalty(self, pos_to_evaluate: Position, move_direction: str, current_head_pos: Position, current_snake_body: Tuple[Position, ...], golden_path_list: Optional[List[Position]]) -> float:
+        if golden_path_list is None:
+            # current_snake_body is before the move, head is current_head_pos.
+            # simulated_body_after_this_move has pos_to_evaluate as its head.
+            simulated_body_after_this_move = (pos_to_evaluate,) + current_snake_body[:-1]
+            if self._is_dangerous_constriction(pos_to_evaluate, move_direction, simulated_body_after_this_move):
+                return self.danger_zone_penalty # This is a negative value
+        return 0.0
 
     def get_best_move(self, snake_body: List[Tuple[int, int]], food_pos: Tuple[int, int],
                       current_direction: Optional[str]) -> str:
@@ -297,88 +395,30 @@ class SmartSnakeAI:
         if path_to_food:
             is_trap = self._is_path_a_trap(path_to_food, snake_pos)
             if not is_trap or \
-               (is_trap and self.moves_since_food > self.patience_threshold * 0.5) or \
+               (is_trap and self.moves_since_food > self.patience_threshold * self.trapped_path_patience_leniency_factor) or \
                self.moves_since_food > self.patience_threshold:
                 golden_path = path_to_food
 
         # Score moves with lookahead
         best_move = None
         best_score = -float('inf')
+        # head = snake_pos[0] # Already defined above
+        # snake_ratio = len(snake_pos) / (self.grid_width * self.grid_height) # Already defined above
 
-        for move, pos in safe_moves:
-            score = self._evaluate_future_state(pos, snake_pos, food)
+        for move_str, next_pos in safe_moves: # 'move_str' is direction string, 'next_pos' is next Position
+            # Initial score from future state evaluation
+            current_score = self._evaluate_future_state(
+                next_pos, snake_pos, food, depth=self.default_lookahead_depth
+            )
 
-            # Additional scoring factors
-            if golden_path and pos == golden_path[0]:
-                score += 10000
+            # Add bonuses and penalties
+            current_score += self._calculate_golden_path_bonus(next_pos, golden_path)
+            current_score += self._calculate_hamiltonian_bonus(next_pos, head, snake_pos, snake_ratio)
+            current_score += self._calculate_recent_position_penalty(next_pos, snake_pos)
+            current_score += self._calculate_danger_zone_penalty(next_pos, move_str, head, snake_pos, golden_path)
             
-            if self._follows_hamiltonian(pos, head): # head is snake_pos[0]
-                current_hamiltonian_bonus = 50 * snake_ratio
-
-                # Contextual Safety: Check for immediate "breathing room" if following Hamiltonian cycle.
-                # This applies more strongly if the snake is long and the cycle path might be the only space left.
-                if len(snake_pos) > self.grid_width * self.grid_height * 0.4: # Threshold: snake fills >40% of grid
-                    try:
-                        pos_idx = self.hamiltonian_indices[pos]
-                        # The position snake just came from is 'head' (snake_pos[0])
-                        # The position on cycle after 'pos' is 'next_on_cycle'
-                        next_on_cycle = self.hamiltonian_cycle[(pos_idx + 1) % len(self.hamiltonian_cycle)]
-
-                        escape_routes = 0
-                        for direction in self.directions:
-                            neighbor = self._move_position(pos, direction)
-
-                            # Don't count moving back to 'head' as an escape
-                            if neighbor == head:
-                                continue
-                            # Don't count moving along the cycle to 'next_on_cycle' as an escape
-                            if neighbor == next_on_cycle:
-                                continue
-
-                            # An escape route must be on the grid and not part of the snake's current body
-                            if self._is_on_grid(neighbor) and neighbor not in snake_pos:
-                                escape_routes += 1
-
-                        if escape_routes == 0: # No immediate way off the cycle path
-                            current_hamiltonian_bonus *= 0.25 # Significantly reduce bonus
-                        elif escape_routes == 1: # Only one way off
-                            current_hamiltonian_bonus *= 0.75 # Slightly reduce bonus
-
-                    except KeyError:
-                        # Should not happen if _follows_hamiltonian is true and pos is on cycle.
-                        # If pos is somehow not in self.hamiltonian_indices, skip this adjustment.
-                        pass
-
-                score += current_hamiltonian_bonus
-
-            # Penalty for recently visited locations (to avoid short loops)
-            # snake_pos[0] is current head. snake_pos[1] is its previous location (now neck).
-            # We want to penalize if the new head 'pos' lands on a spot where the head was
-            # a few steps ago (e.g., snake_pos[2], snake_pos[3], ...).
-            # _get_valid_moves already prevents moving to snake_pos[1]'s future location.
-
-            # Determine how deep into the snake's body we check for recent positions.
-            # Max depth is self.recent_history_length, but also limited by snake's actual length.
-            # We check from index 2 (segment after neck) up to recent_history_length.
-            # E.g., if recent_history_length = 5, we check snake_pos[2], snake_pos[3], snake_pos[4].
-            history_check_limit = min(self.recent_history_length, len(snake_pos))
-            for k in range(2, history_check_limit):
-                if pos == snake_pos[k]:
-                    score -= 500  # Apply penalty
-                    break         # Apply penalty only once
-
-            # Danger Zone Assessment: Penalize moving into constrictions if not on a food path
-            if golden_path is None:
-                # snake_pos[0] is the current head before this move.
-                # 'pos' is the potential next head position.
-                # 'move' is the direction string for the current move being evaluated.
-                simulated_body_after_this_move = (pos,) + snake_pos[:-1]
-
-                if self._is_dangerous_constriction(pos, move, simulated_body_after_this_move):
-                    score -= 1000  # Apply a significant penalty
-            
-            if score > best_score:
-                best_score = score
-                best_move = move
+            if current_score > best_score:
+                best_score = current_score
+                best_move = move_str
         
-        return best_move if best_move else safe_moves[0][0]
+        return best_move if best_move else safe_moves[0][0] # Fallback

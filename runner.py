@@ -1,6 +1,6 @@
 import random
 import pygame
-from snake_ai import SmartSnakeAI, Position # Import Position class
+from snake_ai import SnakeAI, Position # Import Position class
 
 # --- Constants ---
 GRID_WIDTH = 30
@@ -63,7 +63,7 @@ spawn_food(grid)
 
 # Initialize snake AI
 if __name__ == '__main__':
-    snake_ai = SmartSnakeAI(GRID_WIDTH, GRID_HEIGHT)
+    snake_ai = SnakeAI(GRID_WIDTH, GRID_HEIGHT)
     fps_counter = 0
     fps_timer = pygame.time.get_ticks()
     running = True
